@@ -99,7 +99,7 @@ def create_verified_zip_bundle(db: DatabaseAdapter, settings: AppSettings) -> di
             raise RuntimeError(f"ZIP CRC verification failed on: {bad_file}")
 
     retention = int(settings.firm_config["alerts"]["backup_retention_days"])
-    for old_zip in sorted(settings.backups_dir.glob("ann_firm_vault_*.zip"), reverse=True)[retention:]
+    for old_zip in sorted(settings.backups_dir.glob("ann_firm_vault_*.zip"), reverse=True)[retention:]:
         old_zip.unlink(missing_ok=True)
 
     drive_status = upload_file_to_google_drive(settings, zip_path, settings.google_drive_vault_folder_id)
