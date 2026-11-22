@@ -26,9 +26,9 @@ def export_clean_csv(db: DatabaseAdapter, settings: AppSettings, dataset_name: s
             () if department == "ALL" else (department,),
         ),
         "work_hours": (
-            "SELECT employee_code, employee_name, role_type, department, work_date, check_in_at, check_out_at, hours_worked, status_flag FROM employee_work_hours ORDER BY work_date DESC, employee_id DESC"
+            "SELECT employee_code, employee_name, role_type, department, work_date, check_in_at, check_out_at, hours_worked, status_flag FROM employee_work_hours ORDER BY work_date DESC, scan_id DESC"
             if department == "ALL"
-            else "SELECT employee_code, employee_name, role_type, department, work_date, check_in_at, check_out_at, hours_worked, status_flag FROM employee_work_hours WHERE department = %s ORDER BY work_date DESC, employee_id DESC",
+            else "SELECT employee_code, employee_name, role_type, department, work_date, check_in_at, check_out_at, hours_worked, status_flag FROM employee_work_hours WHERE department = %s ORDER BY work_date DESC, scan_id DESC",
             () if department == "ALL" else (department,),
         ),
         "ops": (
