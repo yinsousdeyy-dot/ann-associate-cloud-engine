@@ -1,0 +1,58 @@
+{
+  "users": [
+    {
+      "full_name": "Bong Philen",
+      "telegram_chat_id": "111111111",
+      "role": "executive",
+      "department": "ALL",
+      "subscriptions": [
+        "survey_charts",
+        "low_survey_alerts",
+        "invoices",
+        "work_hours_summary",
+        "late_scan_alerts",
+        "datasets_zip",
+        "daily_digest"
+      ],
+      "is_active": true
+    },
+    {
+      "full_name": "Corporate & Tax Supervisor",
+      "telegram_chat_id": "222222222",
+      "role": "supervisor",
+      "department": "Corporate & Tax",
+      "subscriptions": [
+        "team_work_hours",
+        "survey_charts",
+        "datasets_csv"
+      ],
+      "is_active": true
+    },
+    {
+      "full_name": "Academy & Events Supervisor",
+      "telegram_chat_id": "333333333",
+      "role": "supervisor",
+      "department": "Academy",
+      "subscriptions": [
+        "team_work_hours",
+        "survey_charts",
+        "invoices",
+        "datasets_csv"
+      ],
+      "is_active": true
+    },
+    {
+      "full_name": "IT & Data Admin",
+      "telegram_chat_id": "444444444",
+      "role": "admin",
+      "department": "ALL",
+      "subscriptions": [
+        "quarantine_alerts",
+        "backup_health",
+        "system_errors",
+        "datasets_zip"
+      ],
+      "is_active": true
+    }
+  ]
+}

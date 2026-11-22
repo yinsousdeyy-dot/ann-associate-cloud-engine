@@ -1,0 +1,24 @@
+{
+  "organization": {
+    "name_en": "ANN & ASSOCIATES LAW FIRM & ACADEMY",
+    "name_km": "សាលាបណ្តុះបណ្តាល អាន និង សហការី",
+    "tagline": "Recognized Globally - Trusted Locally",
+    "address": "Unit B-29, 1st Floor, Connexion Building, Koh Pich, Phnom Penh",
+    "phone": "087-613-111",
+    "website": "ann-associates.com.kh",
+    "currency_fx_khr": 4000
+  },
+  "attendance": {
+    "work_start_hour": 8,
+    "work_start_minute": 30,
+    "late_grace_minutes": 10,
+    "work_end_hour": 17,
+    "work_end_minute": 30
+  },
+  "alerts": {
+    "low_survey_rating_threshold": 3.5,
+    "morning_rollcall_time": "08:45",
+    "evening_wrapup_time": "17:30",
+    "backup_retention_days": 14
+  }
+}

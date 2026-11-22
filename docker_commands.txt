@@ -1,0 +1,28 @@
+
+Inspect & Monitor Services
+
+• docker compose ps lists all containers for your project along with their current status and open ports.
+• docker compose logs -f streams real-time logs from all running containers (add a service name at the end to filter).
+• docker compose top displays the active processes running inside each container.
+• docker compose images shows the built or pulled images currently used by your services.
+• docker compose stats streams live CPU, memory, and network usage for your containers.
+
+Interact &  Debug Inside Containers
+
+• docker compose exec <service_name> sh (or bash) opens an interactive terminal inside a running container.
+• docker compose exec <service_name> <command> runs a one-off command (like database migrations or tests) inside an already running container.
+• docker compose run --rm <service_name> <command> spins up a temporary container to run a single command and deletes it immediately afterward. 
+
+
+Control & Update Lifecycle
+
+• docker compose restart restarts all running services without rebuilding them.
+• docker compose stop halts running containers without removing them or their networks.
+• docker compose start resumes previously stopped containers.
+• docker compose up -d --build rebuilds images and recreates containers in one step whenever you change your code or Dockerfile
+
+
+Clean Up & Shut Down
+
+• docker compose down stops and removes all containers and networks created by up.
+• docker compose down -v stops and removes containers, networks, and attached named volumes (wiping database data).

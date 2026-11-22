@@ -1,0 +1,26 @@
+// Align qr-scan-attendance-v2/prisma/schema.prisma to the shared Firm Cloud PostgreSQL DB
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+model EmployeeWorkHour {
+  scan_id       Int      @id @default(autoincrement())
+  employee_code String
+  employee_name String
+  role_type     String
+  department    String
+  work_date     String
+  check_in_at   String?
+  check_out_at  String?
+  hours_worked  Decimal  @default(0.00) @db.Decimal(5, 2)
+  status_flag   String   @default("ON_TIME")
+  updated_at    String
+
+  @@unique([employee_code, work_date])
+  @@map("employee_work_hours")
+}

@@ -1,0 +1,19 @@
+# Confidentiality & BAKC Data Protection
+.env
+*.db
+*.sqlite
+*.sqlite3
+*.zip
+*.log
+*.png
+service_account*.json
+data/
+artifacts/
+
+# Python / OS
+__pycache__/
+*.pyc
+.venv/
+.pytest_cache/
+.DS_Store
+Thumbs.db

@@ -1,0 +1,46 @@
+services:
+  postgres:
+
+    # postgres image 
+    image: postgres:16-alpine
+    container_name: ann_firm_postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ann_firm_db
+      POSTGRES_USER: ann_user
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-ChangeMeStrongFirmPass2026!}
+      TZ: Asia/Phnom_Penh
+    ports:
+      - "5432:5432"
+    volumes:
+      - ann_pg_data:/var/lib/postgresql/data
+      - ./sql/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ann_user -d ann_firm_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+   # cloud 
+  cloud_engine:
+    build: .
+    container_name: ann_firm_cloud_engine
+    # adjust the cloud for restart from unless stopped to always
+    restart: always
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql://ann_user:${POSTGRES_PASSWORD:-ChangeMeStrongFirmPass2026!}@postgres:5432/ann_firm_db
+      PORT: 8080
+      TZ: Asia/Phnom_Penh
+    ports:
+      - "8080:8080"
+    volumes:
+      - ./artifacts:/app/artifacts
+      - ./config:/app/config
+
+volumes:
+  ann_pg_data:
