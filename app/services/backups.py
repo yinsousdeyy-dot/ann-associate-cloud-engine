@@ -26,9 +26,9 @@ def export_clean_csv(db: DatabaseAdapter, settings: AppSettings, dataset_name: s
             () if department == "ALL" else (department,),
         ),
         "work_hours": (
-            "SELECT employee_code, employee_name, role_type, department, work_date, check_in_at, check_out_at, hours_worked, status_flag FROM employee_work_hours ORDER BY work_date DESC, employee_name ASC"
+            "SELECT employee_code, employee_name, role_type, department, work_date, check_in_at, check_out_at, hours_worked, status_flag FROM employee_work_hours ORDER BY work_date DESC, employee_id DESC"
             if department == "ALL"
-            else "SELECT employee_code, employee_name, role_type, department, work_date, check_in_at, check_out_at, hours_worked, status_flag FROM employee_work_hours WHERE department = %s ORDER BY work_date DESC, employee_name ASC",
+            else "SELECT employee_code, employee_name, role_type, department, work_date, check_in_at, check_out_at, hours_worked, status_flag FROM employee_work_hours WHERE department = %s ORDER BY work_date DESC, employee_id DESC",
             () if department == "ALL" else (department,),
         ),
         "ops": (
@@ -93,12 +93,13 @@ def create_verified_zip_bundle(db: DatabaseAdapter, settings: AppSettings) -> di
         for chart in settings.charts_dir.glob("*.png"):
             zf.write(chart, arcname=f"charts/{chart.name}")
 
+    with zipfile.ZipFile(zip_path, "r") as zf:
         bad_file = zf.testzip()
         if bad_file is not None:
             raise RuntimeError(f"ZIP CRC verification failed on: {bad_file}")
 
     retention = int(settings.firm_config["alerts"]["backup_retention_days"])
-    for old_zip in sorted(settings.backups_dir.glob("ann_firm_vault_*.zip"), reverse=True)[retention:]:
+    for old_zip in sorted(settings.backups_dir.glob("ann_firm_vault_*.zip"), reverse=True)[retention:]
         old_zip.unlink(missing_ok=True)
 
     drive_status = upload_file_to_google_drive(settings, zip_path, settings.google_drive_vault_folder_id)
