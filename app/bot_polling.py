@@ -23,20 +23,28 @@ async def main():
             try:
                 resp = await client.get(
                     f"https://api.telegram.org/bot{settings.telegram_bot_token}/getUpdates",
-                    parWams={"offset": offset, "timeout": 25},
+                    params={"offset": offset, "timeout": 25},
                 )
                 data = resp.json()
                 for upd in data.get("result", []):
                     offset = upd["update_id"] + 1
                     if "message" in upd and "text" in upd["message"]:
-                        await tg.handle_command(str(upd["message"]["chat"]["id"]), upd["message"]["text"].strip().lower())
+                        chat_id = str(upd["message"]["chat"]["id"])
+                        raw_text = upd["message"]["text"].strip()
+                        cmd = raw_text.split("@")[0].lower() if raw_text.startswith("/") else raw_text.lower()
+                        await tg.handle_command(chat_id, cmd)
                     elif "callback_query" in upd:
                         cb = upd["callback_query"]
-                        await client.post(
-                            f"https://api.telegram.org/bot{settings.telegram_bot_token}/answerCallbackQuery",
-                            json={"callback_query_id": cb["id"]},
-                        )
-                        await tg.handle_command(str(cb["message"]["chat"]["id"]), cb["data"])
+                        cb_msg = cb.get("message") or {}
+                        chat_id = str(cb_msg.get("chat", {}).get("id") or cb.get("from", {}).get("id"))
+                        try:
+                            await client.post(
+                                f"https://api.telegram.org/bot{settings.telegram_bot_token}/answerCallbackQuery",
+                                json={"callback_query_id": cb["id"]},
+                            )
+                        except Exception:
+                            pass
+                        await tg.handle_command(chat_id, cb.get("data", ""))
             except Exception as exc:
                 print(f"[WARN] Polling error (retrying in 5s): {exc}")
                 await asyncio.sleep(5)

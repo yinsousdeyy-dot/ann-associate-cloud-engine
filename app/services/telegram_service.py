@@ -1,4 +1,6 @@
 import json
+import logging
+from contextvars import ContextVar
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -8,12 +10,18 @@ from app.db import DatabaseAdapter
 from app.services.backups import create_verified_zip_bundle, export_clean_csv
 from app.services.charts import generate_revenue_and_attendance_chart, generate_survey_chart
 
+logger = logging.getLogger("telegram_service")
+
+# When set, send_* record the reply in `last_dispatched` but never call the Telegram API.
+dry_run: ContextVar[bool] = ContextVar("telegram_dry_run", default=False)
+
 
 class TelegramRBACService:
     def __init__(self, db: DatabaseAdapter, settings: AppSettings):
         self.db = db
         self.settings = settings
         self.token = settings.telegram_bot_token
+        self.last_dispatched: dict[str, Any] | None = None
 
     @property
     def enabled(self) -> bool:
@@ -87,41 +95,74 @@ class TelegramRBACService:
         }
 
     async def send_message(self, chat_id: str, text: str, reply_markup: dict | None = None) -> bool:
-        if not self.enabled:
-            return False
+        self.last_dispatched = {
+            "type": "message",
+            "chat_id": str(chat_id),
+            "text": text,
+            "reply_markup": reply_markup,
+            "timestamp": datetime.now(self.settings.tz).isoformat(),
+        }
+        if not self.enabled or dry_run.get():
+            return True  # Recorded in last_dispatched only
         import httpx
         payload: dict[str, Any] = {"chat_id": str(chat_id), "text": text[:4000]}
         if reply_markup:
             payload["reply_markup"] = reply_markup
-        async with httpx.AsyncClient(timeout=15) as client:
-            resp = await client.post(self._url("sendMessage"), json=payload)
-            return resp.status_code == 200
+        try:
+            async with httpx.AsyncClient(timeout=15) as client:
+                resp = await client.post(self._url("sendMessage"), json=payload)
+                return resp.status_code == 200
+        except Exception as exc:
+            logger.warning(f"Failed to send Telegram message to {chat_id}: {exc}")
+            return False
 
     async def send_photo(self, chat_id: str, photo_path: Path, caption: str) -> bool:
-        if not self.enabled or not photo_path.exists():
-            return False
+        self.last_dispatched = {
+            "type": "photo",
+            "chat_id": str(chat_id),
+            "photo": photo_path.name if photo_path else None,
+            "caption": caption,
+            "timestamp": datetime.now(self.settings.tz).isoformat(),
+        }
+        if not self.enabled or dry_run.get() or not photo_path.exists():
+            return True if photo_path and photo_path.exists() else False
         import httpx
-        async with httpx.AsyncClient(timeout=25) as client:
-            with open(photo_path, "rb") as f:
-                resp = await client.post(
-                    self._url("sendPhoto"),
-                    data={"chat_id": str(chat_id), "caption": caption[:1020]},
-                    files={"photo": (photo_path.name, f, "image/png")},
-                )
-            return resp.status_code == 200
+        try:
+            async with httpx.AsyncClient(timeout=25) as client:
+                with open(photo_path, "rb") as f:
+                    resp = await client.post(
+                        self._url("sendPhoto"),
+                        data={"chat_id": str(chat_id), "caption": caption[:1020]},
+                        files={"photo": (photo_path.name, f, "image/png")},
+                    )
+                return resp.status_code == 200
+        except Exception as exc:
+            logger.warning(f"Failed to send Telegram photo to {chat_id}: {exc}")
+            return False
 
     async def send_document(self, chat_id: str, file_path: Path, caption: str) -> bool:
-        if not self.enabled or not file_path.exists():
-            return False
+        self.last_dispatched = {
+            "type": "document",
+            "chat_id": str(chat_id),
+            "document": file_path.name if file_path else None,
+            "caption": caption,
+            "timestamp": datetime.now(self.settings.tz).isoformat(),
+        }
+        if not self.enabled or dry_run.get() or not file_path.exists():
+            return True if file_path and file_path.exists() else False
         import httpx
-        async with httpx.AsyncClient(timeout=35) as client:
-            with open(file_path, "rb") as f:
-                resp = await client.post(
-                    self._url("sendDocument"),
-                    data={"chat_id": str(chat_id), "caption": caption[:1020]},
-                    files={"document": (file_path.name, f, "application/octet-stream")},
-                )
-            return resp.status_code == 200
+        try:
+            async with httpx.AsyncClient(timeout=35) as client:
+                with open(file_path, "rb") as f:
+                    resp = await client.post(
+                        self._url("sendDocument"),
+                        data={"chat_id": str(chat_id), "caption": caption[:1020]},
+                        files={"document": (file_path.name, f, "application/octet-stream")},
+                    )
+                return resp.status_code == 200
+        except Exception as exc:
+            logger.warning(f"Failed to send Telegram document to {chat_id}: {exc}")
+            return False
 
     async def notify_subscription(self, subscription: str, text: str, department: str | None = None, photo_path: Path | None = None) -> int:
         recipients = self.resolve_recipients(subscription, department)
@@ -136,22 +177,29 @@ class TelegramRBACService:
     async def handle_command(self, chat_id: str, action: str) -> dict[str, Any]:
         user = self.get_user(chat_id)
         if not user:
-            await self.send_message(chat_id, "Access denied. Authorized Ann & Associates personnel only (BAKC RBAC).")
-            return {"authorized": False}
+            msg = (
+                "Access denied. Authorized Ann & Associates personnel only (BAKC RBAC).\n"
+                f"Your chat ID is {chat_id}. Send it to the firm administrator to request access."
+            )
+            await self.send_message(chat_id, msg)
+            return {"authorized": False, "message": msg}
 
         role = user["role"]
         dept = user["department"]
         kb = self.keyboard_for_role(role)
 
+        # Normalize action (strip @bot_name if present)
+        if action.startswith("/"):
+            action = action.split("@")[0]
+
         if action in ("/start", "/menu"):
-            await self.send_message(
-                chat_id,
+            msg = (
                 f"ANN & ASSOCIATES LAW FIRM & ACADEMY\n"
                 f"Welcome {user['full_name']} ({role.upper()} | Scope: {dept})\n\n"
-                f"Select a real-time report or download below:",
-                reply_markup=kb,
+                f"Select a real-time report or download below:"
             )
-            return {"authorized": True, "action": "menu"}
+            await self.send_message(chat_id, msg, reply_markup=kb)
+            return {"authorized": True, "action": "menu", "message": msg}
 
         if action in ("/survey", "btn_survey"):
             chart = generate_survey_chart(self.db, self.settings, dept)
@@ -163,25 +211,25 @@ class TelegramRBACService:
                     stats = self.db.fetch_one(conn, "SELECT COUNT(*) AS cnt, COALESCE(ROUND(AVG(rating),2),0) AS avg_r FROM firm_surveys WHERE department = %s", (dept,))
                     fb = self.db.fetch_all(conn, "SELECT respondent_name, chamber, rating, feedback FROM firm_surveys WHERE department = %s AND feedback != '' ORDER BY survey_id DESC LIMIT 3", (dept,))
             fb_lines = "\n".join(f"• {r['respondent_name']} ({r['chamber']}, {r['rating']}/5): \"{r['feedback']}\"" for r in fb) or "• No written feedback yet."
-            await self.send_photo(
-                chat_id, chart,
-                f"Survey Intelligence ({dept}) — {stats['cnt']} Responses | Avg {stats['avg_r']}/5.0",
-            )
-            await self.send_message(chat_id, f"Latest Client Feedback:\n\n{fb_lines}", reply_markup=kb)
-            return {"authorized": True, "action": "survey"}
+            cnt_val = stats["cnt"] if stats else 0
+            avg_val = stats["avg_r"] if stats else 0.0
+            caption = f"Survey Intelligence ({dept}) — {cnt_val} Responses | Avg {avg_val}/5.0"
+            await self.send_photo(chat_id, chart, caption)
+            fb_msg = f"Latest Client Feedback:\n\n{fb_lines}"
+            await self.send_message(chat_id, fb_msg, reply_markup=kb)
+            return {"authorized": True, "action": "survey", "message": f"{caption}\n\n{fb_msg}", "photo": chart.name}
 
         if action in ("/invoices", "btn_invoices"):
             fx = int(self.settings.firm_config["organization"]["currency_fx_khr"])
             chart = generate_revenue_and_attendance_chart(self.db, self.settings)
             with self.db.connection() as conn:
                 tot = self.db.fetch_one(conn, "SELECT COUNT(*) AS cnt, COALESCE(SUM(total_usd),0) AS rev FROM academy_invoices")
-            rev = float(tot["rev"])
-            await self.send_photo(
-                chat_id, chart,
-                f"ANN & ASSOCIATES ACADEMY\nInvoices Issued: {tot['cnt']}\nTotal Revenue: ${rev:,.2f} ({int(rev * fx):,} KHR)",
-            )
+            rev = float(tot["rev"]) if tot else 0.0
+            cnt = tot["cnt"] if tot else 0
+            caption = f"ANN & ASSOCIATES ACADEMY\nInvoices Issued: {cnt}\nTotal Revenue: ${rev:,.2f} ({int(rev * fx):,} KHR)"
+            await self.send_photo(chat_id, chart, caption)
             await self.send_message(chat_id, "Choose next action:", reply_markup=kb)
-            return {"authorized": True, "action": "invoices"}
+            return {"authorized": True, "action": "invoices", "message": caption, "photo": chart.name}
 
         if action in ("/attendance", "btn_attendance"):
             today = datetime.now(self.settings.tz).strftime("%Y-%m-%d")
@@ -194,46 +242,59 @@ class TelegramRBACService:
                 f"• {r['employee_name']} ({r['role_type']} - {r['department']}): In {(r['check_in_at'] or '-')[-8:]} | Out {(r['check_out_at'] or 'Active')[-8:]} | {r['hours_worked']}h [{r['status_flag']}]"
                 for r in rows
             ) or "• No QR scans recorded yet today."
-            await self.send_message(chat_id, f"Live QR Work-Hour Report ({today} | {dept}):\n\n{lines}", reply_markup=kb)
-            return {"authorized": True, "action": "attendance"}
+            msg = f"Live QR Work-Hour Report ({today} | {dept}):\n\n{lines}"
+            await self.send_message(chat_id, msg, reply_markup=kb)
+            return {"authorized": True, "action": "attendance", "message": msg}
 
         if action in ("btn_csv_surveys", "/csv"):
             csv_file = export_clean_csv(self.db, self.settings, "surveys", dept)
-            await self.send_document(chat_id, csv_file, f"Clean Survey Dataset ({dept})")
-            return {"authorized": True, "action": "csv_surveys"}
+            msg = f"Clean Survey Dataset ({dept})"
+            await self.send_document(chat_id, csv_file, msg)
+            return {"authorized": True, "action": "csv_surveys", "message": msg, "document": csv_file.name}
 
         if action == "btn_csv_attendance":
             csv_file = export_clean_csv(self.db, self.settings, "work_hours", dept)
-            await self.send_document(chat_id, csv_file, f"Clean Work-Hours Dataset ({dept})")
-            return {"authorized": True, "action": "csv_attendance"}
+            msg = f"Clean Work-Hours Dataset ({dept})"
+            await self.send_document(chat_id, csv_file, msg)
+            return {"authorized": True, "action": "csv_attendance", "message": msg, "document": csv_file.name}
 
-        if action in ("/zip", "btn_zip") and role in ("executive", "admin"):
+        if action in ("/zip", "btn_zip"):
+            if role not in ("executive", "admin"):
+                msg = "Access restricted: Verified ZIP downloads require Executive or Admin authorization."
+                await self.send_message(chat_id, msg, reply_markup=kb)
+                return {"authorized": True, "action": "restricted", "message": msg}
             bundle = create_verified_zip_bundle(self.db, self.settings)
-            await self.send_document(
-                chat_id, bundle["zip_path"],
-                f"Verified Firm Backup ZIP ({bundle['size_kb']} KB)\nVault: {bundle['drive_status']}",
-            )
-            return {"authorized": True, "action": "zip"}
+            msg = f"Verified Firm Backup ZIP ({bundle['size_kb']} KB)\nVault: {bundle['drive_status']}"
+            await self.send_document(chat_id, bundle["zip_path"], msg)
+            return {"authorized": True, "action": "zip", "message": msg, "document": bundle["zip_name"]}
 
-        if action in ("/health", "btn_health") and role in ("executive", "admin"):
+        if action in ("/health", "btn_health"):
+            if role not in ("executive", "admin"):
+                msg = "Access restricted: Health audits require Executive or Admin authorization."
+                await self.send_message(chat_id, msg, reply_markup=kb)
+                return {"authorized": True, "action": "restricted", "message": msg}
             with self.db.connection() as conn:
                 q = self.db.fetch_one(conn, "SELECT COUNT(*) AS cnt FROM quarantine_logs")
                 last = self.db.fetch_one(conn, "SELECT * FROM pipeline_run_logs ORDER BY run_id DESC LIMIT 1")
+            q_cnt = q["cnt"] if q else 0
             last_txt = f"Run #{last['run_id']} ({last['run_timestamp']}) — {last['status']} | Backup: {last['backup_file']}" if last else "No scheduled runs yet."
-            await self.send_message(
-                chat_id,
-                f"Cloud Engine Health & Quarantine Status\n• Engine DB: {'Cloud PostgreSQL' if self.db.is_postgres else 'Local SQLite'}\n• Quarantined Rows: {q['cnt']}\n• Latest Run: {last_txt}",
-                reply_markup=kb,
-            )
-            return {"authorized": True, "action": "health"}
+            msg = f"Cloud Engine Health & Quarantine Status\n• Engine DB: {'Cloud PostgreSQL' if self.db.is_postgres else 'Local SQLite'}\n• Quarantined Rows: {q_cnt}\n• Latest Run: {last_txt}"
+            await self.send_message(chat_id, msg, reply_markup=kb)
+            return {"authorized": True, "action": "health", "message": msg}
 
-        if action in ("/run", "btn_run_sync") and role in ("executive", "admin"):
+        if action in ("/run", "btn_run_sync"):
+            if role not in ("executive", "admin"):
+                msg = "Access restricted: Cloud Sync trigger requires Executive or Admin authorization."
+                await self.send_message(chat_id, msg, reply_markup=kb)
+                return {"authorized": True, "action": "restricted", "message": msg}
             chart = generate_survey_chart(self.db, self.settings, "ALL")
             generate_revenue_and_attendance_chart(self.db, self.settings)
             bundle = create_verified_zip_bundle(self.db, self.settings)
-            await self.send_photo(chat_id, chart, f"Cloud Sync Complete! Verified ZIP: {bundle['zip_name']} ({bundle['size_kb']} KB)")
+            msg = f"Cloud Sync Complete! Verified ZIP: {bundle['zip_name']} ({bundle['size_kb']} KB)"
+            await self.send_photo(chat_id, chart, msg)
             await self.send_message(chat_id, "Ready for next command:", reply_markup=kb)
-            return {"authorized": True, "action": "run_sync"}
+            return {"authorized": True, "action": "run_sync", "message": msg, "photo": chart.name, "document": bundle["zip_name"]}
 
-        await self.send_message(chat_id, "Use the role menu buttons below:", reply_markup=kb)
-        return {"authorized": True, "action": "fallback"}
+        msg = "Use the role menu buttons below:"
+        await self.send_message(chat_id, msg, reply_markup=kb)
+        return {"authorized": True, "action": "fallback", "message": msg}

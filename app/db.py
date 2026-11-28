@@ -141,6 +141,12 @@ class DatabaseAdapter:
             finally:
                 conn.close()
 
+    def integrity_errors(self) -> tuple[type[Exception], ...]:
+        if self.is_postgres:
+            import psycopg
+            return (psycopg.IntegrityError,)
+        return (sqlite3.IntegrityError,)
+
     def adapt_sql(self, sql: str) -> str:
         if self.is_postgres:
             return sql

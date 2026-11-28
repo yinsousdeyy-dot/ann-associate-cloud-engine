@@ -2,6 +2,7 @@ import os
 import tempfile
 import unittest
 import zipfile
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from app.config import load_settings
@@ -21,6 +22,9 @@ class TestAnnAssociatesCloudEngine(unittest.TestCase):
     def setUp(self):
         self.tmpdir = tempfile.TemporaryDirectory()
         os.environ["DATABASE_URL"] = f"sqlite:///{Path(self.tmpdir.name) / 'test_firm.db'}"
+        os.environ["GOOGLE_DRIVE_ENABLED"] = "false"
+        os.environ["QR_MAX_BACKDATE_HOURS"] = "72"
+        self.addCleanup(os.environ.pop, "QR_MAX_BACKDATE_HOURS", None)
         self.settings = load_settings()
         self.db = DatabaseAdapter(self.settings)
         self.db.init_schema_and_seed_rbac()
@@ -45,6 +49,7 @@ class TestAnnAssociatesCloudEngine(unittest.TestCase):
         self.assertEqual(inv_cnt, 2)
 
     def test_qr_work_hour_scan_and_rbac_routing(self):
+        day = (datetime.now(self.settings.tz) - timedelta(days=1)).strftime("%Y-%m-%d")
         in_res = ingest_qr_work_hour_scan(
             self.db, self.settings,
             {
@@ -53,7 +58,7 @@ class TestAnnAssociatesCloudEngine(unittest.TestCase):
                 "role_type": "Intern",
                 "department": "Corporate & Tax",
                 "action": "CHECK_IN",
-                "scanned_at": "2026-11-20T08:55:00+07:00",
+                "scanned_at": f"{day}T08:55:00+07:00",
             },
         )
         self.assertEqual(in_res["status_flag"], "LATE")
@@ -66,7 +71,7 @@ class TestAnnAssociatesCloudEngine(unittest.TestCase):
                 "role_type": "Intern",
                 "department": "Corporate & Tax",
                 "action": "CHECK_OUT",
-                "scanned_at": "2026-11-20T17:35:00+07:00",
+                "scanned_at": f"{day}T17:35:00+07:00",
             },
         )
         self.assertGreater(out_res["hours_worked"], 8.5)

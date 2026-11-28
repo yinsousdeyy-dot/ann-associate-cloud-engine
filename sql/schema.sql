@@ -1,10 +1,5 @@
 -- Ann & Associates Law Firm & Academy
 -- Shared Managed Cloud PostgreSQL Schema (Production)
--- Wanted to import extension 
-CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
--- use generate_uuid_v4()
-
-
 CREATE TABLE IF NOT EXISTS telegram_users_rbac (
     user_id SERIAL PRIMARY KEY,
     full_name TEXT NOT NULL,

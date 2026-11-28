@@ -1,24 +1,31 @@
 import csv
 import json
+import math
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
 from app.config import AppSettings
 from app.db import DatabaseAdapter
+from app.models import MAX_PRICE_USD
 from app.services.receipts import generate_a5_receipt_html
 
 EMAIL_RE = re.compile(r"^[a-zA-Z0-9_.+-]+@[a-zA-Z0-9-]+\.[a-zA-Z0-9-.]+$")
+TS_FORMAT = "%Y-%m-%d %H:%M:%S"
+MAX_SHIFT_HOURS = 16
+RECEIPT_ATTEMPTS = 5
 
 
 def normalize_phone_kh(raw_phone: str) -> str | None:
     digits = re.sub(r"[^\d]", "", str(raw_phone or "").strip())
-    if digits.startswith("0"):
-        digits = "+855" + digits[1:]
+    if digits.startswith("8550"):
+        digits = "+855" + digits[4:]
     elif digits.startswith("855"):
         digits = "+" + digits
-    elif len(digits) >= 8:
+    elif digits.startswith("0"):
+        digits = "+855" + digits[1:]
+    elif len(digits) in (8, 9):
         digits = "+855" + digits
     else:
         return None
@@ -33,13 +40,30 @@ def log_quarantine(db: DatabaseAdapter, conn: Any, category: str, payload: dict[
         VALUES (%s, %s, %s, %s)
         ON CONFLICT (category, raw_payload, rejection_reason) DO NOTHING
         ''',
-        (category, json.dumps(payload, ensure_ascii=False, sort_keys=True), reason, now_str),
+        (category, json.dumps(payload, ensure_ascii=False, sort_keys=True, default=str), reason, now_str),
     )
 
 
+def _invoice_record(row: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "receipt_no": row["receipt_no"],
+        "khmer_name": row["khmer_name"],
+        "latin_name": row["latin_name"],
+        "email": row["email"],
+        "phone_e164": row["phone_e164"],
+        "course_title": row["course_title"],
+        "payment_method": row["payment_method"],
+        "total_usd": float(row["total_usd"]),
+        "total_khr": int(row["total_khr"]),
+        "issued_at": row["issued_at"],
+    }
+
+
 def ingest_academy_record(db: DatabaseAdapter, settings: AppSettings, raw: dict[str, Any]) -> dict[str, Any]:
+    """Issues an invoice and receipt. An invoice is immutable once issued: re-submitting the same
+    email and course returns the original record (duplicate=True) and changes nothing."""
     now = datetime.now(settings.tz)
-    now_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    now_str = now.strftime(TS_FORMAT)
     fx = int(settings.firm_config["organization"]["currency_fx_khr"])
 
     km = str(raw.get("khmer_name") or raw.get("Khmer_Name") or "").strip()
@@ -58,68 +82,63 @@ def ingest_academy_record(db: DatabaseAdapter, settings: AppSettings, raw: dict[
         errors.append(f"Invalid Cambodia phone: {raw.get('phone') or raw.get('Phone') or ''}")
     try:
         usd = round(float(raw.get("price_usd") if "price_usd" in raw else raw.get("Price_USD", 0)), 2)
-        if usd < 0:
+        if not math.isfinite(usd) or usd < 0 or usd > MAX_PRICE_USD:
             raise ValueError
         khr = int(round(usd * fx))
-    except (ValueError, TypeError):
-        errors.append("Invalid price_usd")
+    except (ValueError, TypeError, OverflowError):
+        errors.append(f"Invalid price_usd (must be between 0 and {MAX_PRICE_USD:g})")
         usd, khr = 0.0, 0
 
-    with db.connection() as conn:
-        if errors:
-            reason = "; ".join(errors)
+    if errors:
+        reason = "; ".join(errors)
+        with db.connection() as conn:
             log_quarantine(db, conn, "academy", raw, reason, now_str)
-            return {"status": "quarantined", "reason": reason}
+        return {"status": "quarantined", "reason": reason}
 
-        existing = db.fetch_one(
-            conn,
-            "SELECT receipt_no FROM academy_invoices WHERE email = %s AND course_title = %s",
-            (email, course),
-        )
-        if existing:
-            receipt_no = existing["receipt_no"]
-        else:
-            cnt_row = db.fetch_one(conn, "SELECT COUNT(*) AS cnt FROM academy_invoices")
-            next_num = int(cnt_row["cnt"]) + 1 if cnt_row else 1
-            receipt_no = f"AA-{now.year}-{next_num:03d}"
+    rec: dict[str, Any] | None = None
+    duplicate = False
+    for _ in range(RECEIPT_ATTEMPTS):
+        try:
+            with db.connection() as conn:
+                existing = db.fetch_one(
+                    conn,
+                    "SELECT * FROM academy_invoices WHERE email = %s AND course_title = %s",
+                    (email, course),
+                )
+                if existing:
+                    rec, duplicate = _invoice_record(existing), True
+                else:
+                    row = db.fetch_one(conn, "SELECT COALESCE(MAX(id), 0) AS max_id FROM academy_invoices")
+                    next_num = int(row["max_id"]) + 1 if row else 1
+                    receipt_no = f"AA-{now.year}-{next_num:03d}"
+                    db.execute(
+                        conn,
+                        '''
+                        INSERT INTO academy_invoices (
+                            receipt_no, khmer_name, latin_name, email, phone_e164,
+                            course_title, payment_method, total_usd, total_khr, issued_at
+                        ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
+                        ''',
+                        (receipt_no, km, en, email, phone, course, method, usd, khr, now_str),
+                    )
+                    rec = {
+                        "receipt_no": receipt_no, "khmer_name": km, "latin_name": en, "email": email,
+                        "phone_e164": phone, "course_title": course, "payment_method": method,
+                        "total_usd": usd, "total_khr": khr, "issued_at": now_str,
+                    }
+            break
+        except db.integrity_errors():
+            # Another request took this receipt number or inserted the same invoice first. Re-read and retry.
+            continue
+    if rec is None:
+        raise RuntimeError("Could not allocate a unique receipt number")
 
-        db.execute(
-            conn,
-            '''
-            INSERT INTO academy_invoices (
-                receipt_no, khmer_name, latin_name, email, phone_e164,
-                course_title, payment_method, total_usd, total_khr, issued_at
-            ) VALUES (%s, %s, %s, %s, %s, %s, %s, %s, %s, %s)
-            ON CONFLICT (email, course_title) DO UPDATE SET
-                khmer_name = EXCLUDED.khmer_name,
-                latin_name = EXCLUDED.latin_name,
-                phone_e164 = EXCLUDED.phone_e164,
-                payment_method = EXCLUDED.payment_method,
-                total_usd = EXCLUDED.total_usd,
-                total_khr = EXCLUDED.total_khr,
-                issued_at = EXCLUDED.issued_at
-            ''',
-            (receipt_no, km, en, email, phone, course, method, usd, khr, now_str),
-        )
-
-    rec = {
-        "receipt_no": receipt_no,
-        "khmer_name": km,
-        "latin_name": en,
-        "email": email,
-        "phone_e164": phone,
-        "course_title": course,
-        "payment_method": method,
-        "total_usd": usd,
-        "total_khr": khr,
-        "issued_at": now_str,
-    }
     receipt_path = generate_a5_receipt_html(settings, rec)
-    return {"status": "ok", "record": rec, "receipt_path": str(receipt_path)}
+    return {"status": "ok", "duplicate": duplicate, "record": rec, "receipt_path": str(receipt_path)}
 
 
 def ingest_survey_record(db: DatabaseAdapter, settings: AppSettings, raw: dict[str, Any]) -> dict[str, Any]:
-    now_str = datetime.now(settings.tz).strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(settings.tz).strftime(TS_FORMAT)
     name = str(raw.get("respondent_name") or raw.get("Respondent_Name") or "").strip()
     org = str(raw.get("organization") or raw.get("Organization") or "Independent").strip()
     chamber = str(raw.get("chamber") or raw.get("Chamber") or "Independent").strip()
@@ -135,7 +154,7 @@ def ingest_survey_record(db: DatabaseAdapter, settings: AppSettings, raw: dict[s
         rating = round(float(raw.get("rating") if "rating" in raw else raw.get("Rating", 0)), 2)
         if not (1.0 <= rating <= 5.0):
             raise ValueError
-    except (ValueError, TypeError):
+    except (ValueError, TypeError, OverflowError):
         errors.append("Rating must be between 1.0 and 5.0")
         rating = 0.0
 
@@ -183,7 +202,7 @@ def ingest_survey_record(db: DatabaseAdapter, settings: AppSettings, raw: dict[s
 
 
 def ingest_ops_record(db: DatabaseAdapter, settings: AppSettings, raw: dict[str, Any]) -> dict[str, Any]:
-    now_str = datetime.now(settings.tz).strftime("%Y-%m-%d %H:%M:%S")
+    now_str = datetime.now(settings.tz).strftime(TS_FORMAT)
     cname = str(raw.get("client_name") or raw.get("Client_Name") or "").strip()
     email = str(raw.get("email") or raw.get("Email") or "").strip().lower()
     phone = normalize_phone_kh(str(raw.get("phone") or raw.get("Phone") or ""))
@@ -232,34 +251,70 @@ def ingest_ops_record(db: DatabaseAdapter, settings: AppSettings, raw: dict[str,
     }
 
 
+def _reject_scan(db: DatabaseAdapter, conn: Any, scan: dict[str, Any], reason: str, ts_str: str) -> dict[str, Any]:
+    log_quarantine(db, conn, "qr-scan", scan, reason, ts_str)
+    return {"status": "quarantined", "reason": reason}
+
+
 def ingest_qr_work_hour_scan(db: DatabaseAdapter, settings: AppSettings, scan: dict[str, Any]) -> dict[str, Any]:
-    now = datetime.now(settings.tz)
-    if scan.get("scanned_at"):
+    """Records a check-in or check-out.
+
+    Rules: scanned_at must be a valid timestamp, at most five minutes ahead of the server clock and no older
+    than QR_MAX_BACKDATE_HOURS. A check-out needs an open check-in, either today or from a shift that began
+    within the last 16 hours (overnight shifts). A second check-out for the same shift is rejected."""
+    real_now = datetime.now(settings.tz)
+    now = real_now
+    rejection = ""
+    raw_ts = scan.get("scanned_at")
+    if raw_ts:
         try:
-            parsed = datetime.fromisoformat(str(scan["scanned_at"]).replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(str(raw_ts).replace("Z", "+00:00"))
             now = parsed.astimezone(settings.tz) if parsed.tzinfo else parsed.replace(tzinfo=settings.tz)
+            if now > real_now + timedelta(minutes=5):
+                rejection = "scanned_at is in the future"
+            elif now < real_now - timedelta(hours=settings.qr_max_backdate_hours):
+                rejection = f"scanned_at is more than {settings.qr_max_backdate_hours:g} hours old"
         except ValueError:
-            pass
+            rejection = "scanned_at is not a valid ISO 8601 timestamp"
+
+    emp_code = str(scan.get("employee_code") or "").strip()
+    emp_name = str(scan.get("employee_name") or "").strip()
+    role_type = str(scan.get("role_type") or "Employee").strip()
+    dept = str(scan.get("department") or "Corporate & Tax").strip()
+    action = str(scan.get("action") or "CHECK_IN").upper()
+    if action not in ("CHECK_IN", "CHECK_OUT"):
+        action = "CHECK_IN"
+    if not rejection and (not emp_code or not emp_name):
+        rejection = "Missing employee_code or employee_name"
 
     work_date = now.strftime("%Y-%m-%d")
-    ts_str = now.strftime("%Y-%m-%d %H:%M:%S")
+    ts_str = now.strftime(TS_FORMAT)
     att_cfg = settings.firm_config["attendance"]
     start_cutoff_mins = att_cfg["work_start_hour"] * 60 + att_cfg["work_start_minute"] + att_cfg["late_grace_minutes"]
     end_cutoff_mins = att_cfg["work_end_hour"] * 60 + att_cfg["work_end_minute"]
     now_mins = now.hour * 60 + now.minute
 
-    emp_code = str(scan["employee_code"]).strip()
-    emp_name = str(scan["employee_name"]).strip()
-    role_type = str(scan.get("role_type") or "Employee").strip()
-    dept = str(scan.get("department") or "Corporate & Tax").strip()
-    action = str(scan["action"]).upper()
-
     with db.connection() as conn:
+        if rejection:
+            return _reject_scan(db, conn, scan, rejection, real_now.strftime(TS_FORMAT))
+
         existing = db.fetch_one(
             conn,
             "SELECT * FROM employee_work_hours WHERE employee_code = %s AND work_date = %s",
             (emp_code, work_date),
         )
+
+        if action == "CHECK_OUT" and not existing:
+            prev_date = (now - timedelta(days=1)).strftime("%Y-%m-%d")
+            prev = db.fetch_one(
+                conn,
+                "SELECT * FROM employee_work_hours WHERE employee_code = %s AND work_date = %s",
+                (emp_code, prev_date),
+            )
+            if prev and prev["check_in_at"] and not prev["check_out_at"]:
+                started = datetime.strptime(prev["check_in_at"], TS_FORMAT).replace(tzinfo=settings.tz)
+                if timedelta(0) <= now - started <= timedelta(hours=MAX_SHIFT_HOURS):
+                    existing, work_date = prev, prev_date
 
         check_in_at = existing["check_in_at"] if existing else None
         check_out_at = existing["check_out_at"] if existing else None
@@ -270,13 +325,18 @@ def ingest_qr_work_hour_scan(db: DatabaseAdapter, settings: AppSettings, scan: d
             if not check_in_at:
                 check_in_at = ts_str
                 status_flag = "LATE" if now_mins > start_cutoff_mins else "ON_TIME"
-        elif action == "CHECK_OUT":
+        else:
+            if not check_in_at:
+                return _reject_scan(db, conn, scan, "Check-out without a check-in for this shift", ts_str)
+            if check_out_at:
+                return _reject_scan(db, conn, scan, f"Already checked out at {check_out_at[11:16]}", ts_str)
+            t_in = datetime.strptime(check_in_at, TS_FORMAT).replace(tzinfo=settings.tz)
+            if now < t_in:
+                return _reject_scan(db, conn, scan, "Check-out is earlier than the check-in", ts_str)
             check_out_at = ts_str
-            if check_in_at:
-                t_in = datetime.strptime(check_in_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=settings.tz)
-                diff_hrs = max(0.0, (now - t_in).total_seconds() / 3600.0)
-                hours_worked = round(diff_hrs, 2)
-            if now_mins < end_cutoff_mins and status_flag != "LATE":
+            hours_worked = round((now - t_in).total_seconds() / 3600.0, 2)
+            same_day = work_date == now.strftime("%Y-%m-%d")
+            if same_day and now_mins < end_cutoff_mins and status_flag != "LATE":
                 status_flag = "EARLY_LEAVE"
 
         db.execute(
@@ -326,7 +386,7 @@ def ingest_csv_file(db: DatabaseAdapter, settings: AppSettings, category: str, c
     with open(csv_path, mode="r", encoding="utf-8-sig") as f:
         for row in csv.DictReader(f):
             res = handler(db, settings, row)
-            if res["status"] == "ok":
+            if res.get("status") == "ok":
                 ok_count += 1
             else:
                 q_count += 1

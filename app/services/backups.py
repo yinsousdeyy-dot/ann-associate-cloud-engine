@@ -8,11 +8,13 @@ from typing import Any
 
 from app.config import AppSettings
 from app.db import DatabaseAdapter
+from app.services.charts import generate_revenue_and_attendance_chart, generate_survey_chart
 
 
 def export_clean_csv(db: DatabaseAdapter, settings: AppSettings, dataset_name: str, department: str = "ALL") -> Path:
     stamp = datetime.now(settings.tz).strftime("%Y%m%d")
-    out_path = settings.datasets_dir / f"{dataset_name}_{department.lower().replace(' ', '_')}_{stamp}.csv"
+    dept_suffix = department.lower().replace(" ", "_").replace("&", "and")
+    out_path = settings.datasets_dir / f"{dataset_name}_{dept_suffix}_{stamp}.csv"
 
     queries = {
         "invoices": (
@@ -55,30 +57,47 @@ def export_clean_csv(db: DatabaseAdapter, settings: AppSettings, dataset_name: s
 
 
 def upload_file_to_google_drive(settings: AppSettings, file_path: Path, folder_id: str) -> str:
-    '''Uploads a verified ZIP backup or dataset to Firm Google Drive via Service Account API.'''
+    """Uploads a verified ZIP backup or dataset to Firm Google Drive via Service Account API."""
     if not settings.google_drive_enabled or not settings.google_service_account_json_b64 or not folder_id:
         return "Local Cloud Container Vault (Google Drive API disabled)"
 
-    from google.oauth2 import service_account
-    from googleapiclient.discovery import build
-    from googleapiclient.http import MediaFileUpload
+    try:
+        from google.oauth2 import service_account
+        from googleapiclient.discovery import build
+        from googleapiclient.http import MediaFileUpload
 
-    sa_info = json.loads(base64.b64decode(settings.google_service_account_json_b64).decode("utf-8"))
-    creds = service_account.Credentials.from_service_account_info(
-        sa_info, scopes=["https://www.googleapis.com/auth/drive.file"]
-    )
-    service = build("drive", "v3", credentials=creds, cache_discovery=False)
+        sa_info = json.loads(base64.b64decode(settings.google_service_account_json_b64).decode("utf-8"))
+        creds = service_account.Credentials.from_service_account_info(
+            sa_info, scopes=["https://www.googleapis.com/auth/drive.file"]
+        )
+        service = build("drive", "v3", credentials=creds, cache_discovery=False)
 
-    metadata = {"name": file_path.name, "parents": [folder_id]}
-    media = MediaFileUpload(str(file_path), resumable=True)
-    uploaded = service.files().create(body=metadata, media_body=media, fields="id, webViewLink").execute()
-    return f"Uploaded to Firm Google Drive ({uploaded.get('webViewLink', 'OK')})"
+        metadata = {"name": file_path.name, "parents": [folder_id]}
+        media = MediaFileUpload(str(file_path), resumable=True)
+        uploaded = (
+            service.files()
+            .create(
+                body=metadata,
+                media_body=media,
+                fields="id, webViewLink",
+                supportsAllDrives=True,  # Required for Google Workspace Shared Drives
+            )
+            .execute()
+        )
+        return f"Uploaded to Firm Google Drive ({uploaded.get('webViewLink', 'OK')})"
+    except Exception as exc:
+        return f"Local Vault Saved (Drive Upload Skipped: {exc})"
 
 
 def create_verified_zip_bundle(db: DatabaseAdapter, settings: AppSettings) -> dict[str, Any]:
     '''Exports clean CSV datasets + A5 receipts + PNG charts into a CRC-verified ZIP archive.'''
     stamp = datetime.now(settings.tz).strftime("%Y%m%d_%H%M%S")
     zip_path = settings.backups_dir / f"ann_firm_vault_{stamp}.zip"
+
+    # Ensure charts exist before bundling
+    if not list(settings.charts_dir.glob("*.png")):
+        generate_survey_chart(db, settings, "ALL")
+        generate_revenue_and_attendance_chart(db, settings)
 
     csv_files = [
         export_clean_csv(db, settings, name, "ALL")

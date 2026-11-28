@@ -36,6 +36,13 @@ class AppSettings:
     google_drive_vault_folder_id: str
     firm_config: dict[str, Any]
     rbac_seed_path: Path
+    app_env: str = "production"
+    demo_tools_enabled: bool = False
+    qr_max_backdate_hours: float = 24.0
+
+    @property
+    def is_production(self) -> bool:
+        return self.app_env not in ("development", "dev", "local", "test")
 
     def ensure_dirs(self) -> None:
         for d in (
@@ -53,7 +60,7 @@ def load_settings(root: Path = ROOT_DIR) -> AppSettings:
     cfg_path = root / "config" / "settings.json"
     firm_cfg = json.loads(cfg_path.read_text(encoding="utf-8-sig"))
     tz_name = os.getenv("TIMEZONE", "Asia/Phnom_Penh")
-    artifacts_dir = root / "artifacts"
+    artifacts_dir = Path(os.getenv("ARTIFACTS_DIR") or root / "artifacts")
 
     settings = AppSettings(
         root_dir=root,
@@ -76,6 +83,9 @@ def load_settings(root: Path = ROOT_DIR) -> AppSettings:
         google_drive_vault_folder_id=os.getenv("GOOGLE_DRIVE_VAULT_FOLDER_ID", ""),
         firm_config=firm_cfg,
         rbac_seed_path=root / "config" / "rbac_seed.json",
+        app_env=os.getenv("APP_ENV", "production").strip().lower(),
+        demo_tools_enabled=os.getenv("DEMO_TOOLS_ENABLED", "false").strip().lower() == "true",
+        qr_max_backdate_hours=float(os.getenv("QR_MAX_BACKDATE_HOURS", "24")),
     )
     settings.ensure_dirs()
     return settings
