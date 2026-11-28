@@ -64,7 +64,13 @@ def _select(fid: str, label: str, options: list[tuple[str, str]]) -> str:
 
 
 def _table(tid: str, caption: str, heads: list[tuple[str, str]], loading: str) -> str:
-    ths = "".join(f'<th scope="col"{" class=\"num\"" if cls == "num" else ""}>{escape(h)}</th>' for h, cls in heads)
+    
+    #ths = "".join(f'<th scope="col"{" class=\"num\"" if cls == "num" else ""}>{escape(h)}</th>' for h, cls in heads)
+    num_attr =' class="num"'
+    ths = "".join(
+        f'<th scope="col"{num_attr if cls == "num" else ""}>{escape(h)}</th>'
+        for h, cls in heads
+    )
     return (
         f'<div class="table-wrap" tabindex="0" role="region" aria-label="{escape(caption)}">'
         f'<table class="data" id="{tid}"><caption class="sr-only">{escape(caption)}</caption>'
